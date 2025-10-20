@@ -46,7 +46,7 @@ It was designed for the Kaggle Playground Series / Stack Overflow Code Challenge
 1. Clone the repository:
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/Sheral18/PredictRoadAccident.git
 cd PredictRoadAccident
 
 
