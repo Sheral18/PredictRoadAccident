@@ -1,4 +1,4 @@
-# 🚦 Pick the Safer Road — Road Safety Game
+# 🚦 Pick the Safer Road
 
 **Interactive Road Accident Risk Prediction Game using Streamlit**
 
@@ -48,6 +48,9 @@ It was designed for the Kaggle Playground Series / Stack Overflow Code Challenge
 ```bash
 git clone https://github.com/Sheral18/PredictRoadAccident.git
 cd PredictRoadAccident
+
+Here is my Pick the Safer Road Application hosted on Streamlit
+https://predictroadaccident.streamlit.app/
 
 
 pip install -r requirements.txt
