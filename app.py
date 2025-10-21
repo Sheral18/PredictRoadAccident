@@ -6,7 +6,21 @@ import os
 
 st.set_page_config(page_title="Pick the Safer Road", layout="wide")
 
-# --- Configuration: feature names and possible values ---
+# --- Load models (if available) ---
+def load_models(model_dir="models"):
+    models = {}
+    for name in ["lgb", "cat", "xgb"]:
+        path = os.path.join(model_dir, f"{name}_model.joblib")
+        if os.path.exists(path):
+            try:
+                models[name] = joblib.load(path)
+            except:
+                st.warning(f"Failed to load {name} model.")
+    return models
+
+models = load_models()
+
+# --- Input features ---
 FEATURES = {
     "num_lanes": (1, 6, 2, 1),
     "curvature": (0.0, 1.0, 0.3, 0.01),
@@ -15,192 +29,66 @@ FEATURES = {
     "visibility": (0, 1000, 500, 10),
     "road_type": ["highway", "urban", "rural", "residential"],
     "lighting": ["daylight", "dawn_dusk", "night"],
-    "weather": ["clear", "rain", "fog", "snow"],
-    "time_of_day": ["morning", "afternoon", "evening", "night"],
-    "road_signs_present": ["yes", "no"],
-    "public_road": ["yes", "no"],
-    "holiday": ["no", "yes"],
-    "school_season": ["no", "yes"]
+    "weather": ["clear", "rain", "fog", "snow"]
 }
 
-CATEGORICAL_FEATURES = [
-    "road_type", "lighting", "weather", "time_of_day",
-    "road_signs_present", "public_road", "holiday", "school_season"
-]
+# --- Fallback risk score (simple formula) ---
+def simple_risk(row):
+    return (
+        0.15 * (1 - row["num_lanes"]/6) +
+        0.25 * row["curvature"] +
+        0.2  * (row["speed_limit"]/140) +
+        0.2  * (row["traffic_volume"]/10000) +
+        0.1  * (1 - row["visibility"]/1000) +
+        0.1  * (1 if row["lighting"] == "night" else 0.3 if row["lighting"] == "dawn_dusk" else 0) +
+        0.1  * (0 if row["weather"] == "clear" else 0.3 if row["weather"] == "rain" else 0.5 if row["weather"] == "fog" else 0.7)
+    )
 
-NUMERIC_FEATURES = [f for f in FEATURES if f not in CATEGORICAL_FEATURES]
+# --- Streamlit UI ---
+st.title("🚦 Pick the Safer Road")
 
-# --- Initialize session state for roads ---
-if "road1" not in st.session_state:
-    st.session_state.road1 = {}
-if "road2" not in st.session_state:
-    st.session_state.road2 = {}
-
-# --- Helper to build a dataframe row ---
-def build_row(values):
-    return pd.DataFrame({k: [v] for k, v in values.items()})
-
-# --- Load models ---
-@st.cache_resource
-def load_models(model_dir="models"):
-    models = {}
-    candidates = {
-        "lgb": os.path.join(model_dir, "lgb_model.joblib"),
-        "cat": os.path.join(model_dir, "cat_model.joblib"),
-        "xgb": os.path.join(model_dir, "xgb_model.joblib"),
-    }
-    for key, path in candidates.items():
-        if os.path.exists(path):
-            try:
-                models[key] = joblib.load(path)
-            except:
-                pass
-    return models
-
-# --- Improved fallback prediction ---
-def predict_with_models(models, X):
-    preds = {}
-    if models:  # Use real models if available
-        for k, m in models.items():
-            try:
-                preds[k] = m.predict(X)
-            except:
-                pass
-        return preds
-
-    df = X.copy()
-    
-    # Features normalized to [0,1], higher => higher risk
-    df['lanes_risk'] = 1 - df['num_lanes']/6
-    df['curvature_risk'] = df['curvature']
-    df['speed_risk'] = df['speed_limit']/140
-    df['traffic_risk'] = df['traffic_volume']/10000
-    df['visibility_risk'] = 1 - df['visibility']/1000
-    df['lighting_risk'] = df['lighting'].map(lambda x: 1.0 if x=='night' else 0.3 if x=='dawn_dusk' else 0.0)
-    df['signs_risk'] = df['road_signs_present'].map(lambda x: 0.0 if x=='yes' else 0.5)
-    df['weather_risk'] = df['weather'].map({'clear':0.0,'rain':0.3,'fog':0.5,'snow':0.7})
-
-    # Weighted combination for accident risk
-    df['fallback'] = (
-        0.15*df['lanes_risk'] + 
-        0.25*df['curvature_risk'] + 
-        0.2*df['speed_risk'] +
-        0.1*df['traffic_risk'] + 
-        0.1*df['lighting_risk'] + 
-        0.1*df['signs_risk'] +
-        0.1*df['weather_risk'] +
-        0.05*df['visibility_risk']
-    ).clip(0,1)
-
-    preds['fallback'] = df['fallback'].values
-    return preds
-
-# --- App Title ---
-st.title("🚦 Pick the Safer Road — Road Safety Game")
-st.markdown("Select road features for two roads and see which is predicted safer. Enter your Kaggle username to get the joint badge!")
-
-# --- Sidebar: Model selection ---
-models = load_models()
-ensemble_method = st.sidebar.selectbox("Prediction mode", ["Ensemble (average)", "Single model (pick)"], index=0)
-if ensemble_method == "Single model (pick)":
-    model_choice = st.sidebar.selectbox("Pick model", ["lgb","cat","xgb"], index=0)
-else:
-    model_choice = None
-
-st.sidebar.write("Loaded models:")
-for k in ["lgb", "cat", "xgb"]:
-    st.sidebar.write(f"- {k}: {'✅' if k in models else '❌'}")
-
-# --- Columns for Road 1 and Road 2 ---
 col1, col2 = st.columns(2)
 
-with col1:
-    st.subheader("Road 1")
-    for feat, val in FEATURES.items():
-        if feat in CATEGORICAL_FEATURES:
-            st.session_state.road1[feat] = st.selectbox(
-                f"{feat}", val, key=f"r1_{feat}",
-                index=val.index(st.session_state.road1.get(feat, val[0]))
-            )
-        else:
-            mn, mx, df_val, step = val
-            st.session_state.road1[feat] = st.slider(
-                f"{feat}", mn, mx, st.session_state.road1.get(feat, df_val), step=step, key=f"r1_{feat}"
-            )
-    if st.button("Randomize Road 1"):
-        for feat, val in FEATURES.items():
-            if feat in CATEGORICAL_FEATURES:
-                st.session_state.road1[feat] = np.random.choice(val)
+roads = {}
+for i, col in enumerate([col1, col2]):
+    with col:
+        st.subheader(f"Road {i+1}")
+        values = {}
+        for feat, opts in FEATURES.items():
+            if isinstance(opts, tuple):
+                mn, mx, df, step = opts
+                values[feat] = st.slider(feat, mn, mx, df, step=step, key=f"{feat}_{i}")
             else:
-                mn, mx, df_val, step = val
-                choices = np.arange(mn, mx + 1e-9, step)
-                st.session_state.road1[feat] = int(np.random.choice(choices)) if isinstance(df_val, int) else float(np.random.choice(choices))
+                values[feat] = st.selectbox(feat, opts, key=f"{feat}_{i}")
+        roads[f"road{i+1}"] = values
 
-with col2:
-    st.subheader("Road 2")
-    for feat, val in FEATURES.items():
-        if feat in CATEGORICAL_FEATURES:
-            st.session_state.road2[feat] = st.selectbox(
-                f"{feat}", val, key=f"r2_{feat}",
-                index=val.index(st.session_state.road2.get(feat, val[0]))
-            )
-        else:
-            mn, mx, df_val, step = val
-            st.session_state.road2[feat] = st.slider(
-                f"{feat}", mn, mx, st.session_state.road2.get(feat, df_val), step=step, key=f"r2_{feat}"
-            )
-    if st.button("Randomize Road 2"):
-        for feat, val in FEATURES.items():
-            if feat in CATEGORICAL_FEATURES:
-                st.session_state.road2[feat] = np.random.choice(val)
-            else:
-                mn, mx, df_val, step = val
-                choices = np.arange(mn, mx + 1e-9, step)
-                st.session_state.road2[feat] = int(np.random.choice(choices)) if isinstance(df_val, int) else float(np.random.choice(choices))
+# --- Convert to DataFrame ---
+df = pd.DataFrame(roads).T.fillna(0)
 
-# --- Build dataframe ---
-X = pd.concat([build_row(st.session_state.road1).assign(_id="road1"),
-               build_row(st.session_state.road2).assign(_id="road2")], ignore_index=True)
-X.index = ["road1", "road2"]
-
-# --- Predictions ---
-pred_dict = predict_with_models(models, X)
-preds_df = pd.DataFrame(pred_dict, index=X.index)
-
-if ensemble_method == "Ensemble (average)":
-    preds_df["ensemble"] = preds_df.mean(axis=1)
-elif ensemble_method == "Single model (pick)":
-    if model_choice in preds_df.columns:
-        preds_df["selected"] = preds_df[model_choice]
+# --- Predict (fallback if no model) ---
+try:
+    if models:
+        # just pick the first model available
+        model = list(models.values())[0]
+        preds = model.predict(df.select_dtypes(include=[np.number]))
     else:
-        preds_df["selected"] = preds_df.iloc[:,0]
+        preds = df.apply(simple_risk, axis=1)
+except:
+    preds = df.apply(simple_risk, axis=1)
 
-final_col = "ensemble" if "ensemble" in preds_df.columns else ("selected" if "selected" in preds_df.columns else preds_df.columns[0])
+# --- Display results ---
+r1, r2 = preds.iloc[0], preds.iloc[1]
 
-# --- Display predictions ---
-col_a, col_b = st.columns(2)
-with col_a:
-    st.metric("Road 1 predicted accident_risk", f"{float(preds_df.loc['road1', final_col]):.4f}")
-with col_b:
-    st.metric("Road 2 predicted accident_risk", f"{float(preds_df.loc['road2', final_col]):.4f}")
+colA, colB = st.columns(2)
+colA.metric("Road 1 Risk", f"{r1:.4f}")
+colB.metric("Road 2 Risk", f"{r2:.4f}")
 
-# Safer road info
-r1_score = float(preds_df.loc['road1', final_col])
-r2_score = float(preds_df.loc['road2', final_col])
-if r1_score < r2_score:
-    st.success(f"Road 1 is predicted to be safer ({r1_score:.4f} vs {r2_score:.4f})")
-elif r2_score < r1_score:
-    st.success(f"Road 2 is predicted to be safer ({r2_score:.4f} vs {r1_score:.4f})")
+if r1 < r2:
+    st.success(f"✅ Road 1 is safer ({r1:.4f} vs {r2:.4f})")
+elif r2 < r1:
+    st.success(f"✅ Road 2 is safer ({r2:.4f} vs {r1:.4f})")
 else:
-    st.info(f"Both roads have equal predicted risk ({r1_score:.4f})")
+    st.info(f"Both roads have equal risk ({r1:.4f})")
 
-# --- User guess ---
-guess = st.radio("Which road do you think is safer?", ("Road 1", "Road 2", "Tie"))
-if st.button("Submit guess"):
-    correct = "Road 1" if r1_score < r2_score else ("Road 2" if r2_score < r1_score else "Tie")
-    if guess == correct:
-        st.balloons()
-        st.success(f"Correct! ({correct})")
-    else:
-        st.error(f"Incorrect. Correct: {correct}")
-
+st.markdown("<h4 style='text-align: center;'>Made by Sheral Waskar with ❤️ using Streamlit</h4>",
+    unsafe_allow_html=True)
